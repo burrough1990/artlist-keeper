@@ -1,0 +1,80 @@
+name: Artlist Scrape (Self-Chaining)
+on:
+  workflow_dispatch:
+    inputs:
+      step:
+        description: 'Step to run (sfx|footage|templates|collections|all)'
+        required: false
+        default: 'all'
+  schedule:
+    # Weekly: Sunday 00:00 UTC
+    - cron: '0 0 * * 0'
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: wesisad5/artlist-scraper
+          token: ${{ secrets.GH_PAT }}
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install deps
+        run: pip install -r requirements.txt
+
+      - name: Create .env
+        run: |
+          cat > .env << 'EOF'
+          ARTLIST_JWT=${{ secrets.ARTLIST_JWT }}
+          ARTLIST_FLOWS_SESSION_TOKEN=${{ secrets.ARTLIST_FLOWS_SESSION_TOKEN }}
+          ARTLIST_FLOWS_CF_CLEARANCE=${{ secrets.ARTLIST_FLOWS_CF_CLEARANCE }}
+          ARTLIST_FLOWS_CF_BM=${{ secrets.ARTLIST_FLOWS_CF_BM }}
+          ARTLIST_STUDIO_SESSION_TOKEN=${{ secrets.ARTLIST_STUDIO_SESSION_TOKEN }}
+          ARTLIST_STUDIO_CF_CLEARANCE=${{ secrets.ARTLIST_STUDIO_CF_CLEARANCE }}
+          ARTLIST_STUDIO_CF_BM=${{ secrets.ARTLIST_STUDIO_CF_BM }}
+          ARTLIST_STUDIO_CSRF_TOKEN=${{ secrets.ARTLIST_STUDIO_CSRF_TOKEN }}
+          ARTLIST_USER_SESSION=${{ secrets.ARTLIST_USER_SESSION }}
+          ARTLIST_VISITOR_ID=${{ secrets.ARTLIST_VISITOR_ID }}
+          ARTLIST_USER_ID=${{ secrets.ARTLIST_USER_ID }}
+          NETLIFY_SITE_ID=${{ secrets.NETLIFY_SITE_ID }}
+          NETLIFY_TOKEN=${{ secrets.NETLIFY_TOKEN }}
+          NETLIFY_BLOB_NAMESPACE=artlist-scraper
+          HTTP_RATE_LIMIT_RPS=5.0
+          EOF
+
+      - name: Run single step
+        run: |
+          STEP="${{ github.event.inputs.step || 'all' }}"
+          if [ "$STEP" = "all" ]; then
+            python -m src.cli catalog --resume
+          else
+            python -m src.cli step $STEP
+          fi
+
+      - name: Check if done
+        id: check
+        run: |
+          DONE=$(python3 -c "import json; d=json.load(open('data/_meta/progress.json')); print(d.get('done', False))")
+          echo "done=$DONE" >> $GITHUB_OUTPUT
+
+      - name: Commit + push
+        run: |
+          git config user.email "scraper-bot@users.noreply.github.com"
+          git config user.name "artlist-scraper-bot"
+          git remote set-url origin https://x-access-token:${{ secrets.GH_PAT }}@github.com/wesisad5/artlist-scraper.git
+          git add data/ || true
+          git commit -m "Scrape checkpoint $(date -u +%Y-%m-%dT%H:%M:%SZ)" || echo "No changes"
+          git push origin main || true
+
+      - name: Self-chain
+        if: steps.check.outputs.done != 'true'
+        run: |
+          gh workflow run "$GITHUB_WORKFLOW" --repo burrough1990/artlist-keeper -f step=all
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT }}
